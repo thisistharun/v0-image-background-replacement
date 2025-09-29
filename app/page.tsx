@@ -222,7 +222,7 @@ export default function BackgroundReplacer() {
       <div className="max-w-6xl mx-auto p-6">
         {/* Header */}
         <div className="text-center mb-12">
-          <h1 className="text-4xl font-bold text-foreground mb-4 text-balance">Background Replacement Tool</h1>
+          <h1 className="text-4xl font-bold text-foreground mb-4 text-balance">CatalogPro AI</h1>
           <p className="text-lg text-muted-foreground text-pretty max-w-2xl mx-auto">
             Upload an image and let AI replace the background with professional results. Simple, fast, and intuitive.
           </p>
