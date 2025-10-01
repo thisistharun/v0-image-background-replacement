@@ -10,21 +10,54 @@ import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Separator } from "@/components/ui/separator"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Carousel, CarouselContent, CarouselItem, CarouselNext, CarouselPrevious } from "@/components/ui/carousel"
-import { Upload, Download, RotateCcw, ImageIcon, Loader2, AlertCircle, CheckCircle2, Sparkles } from "lucide-react"
+import {
+  Upload,
+  Download,
+  RotateCcw,
+  ImageIcon,
+  Loader2,
+  AlertCircle,
+  CheckCircle2,
+  Sparkles,
+  AlertTriangle,
+} from "lucide-react"
 
 interface ImageDimensions {
   width: number
   height: number
 }
 
-interface MultiViewResponse {
-  success: boolean
-  mode?: string
-  front_b64?: string
-  left_b64?: string
-  right_b64?: string
-  back_b64?: string
+interface MultiViewBinaryData {
+  data?: string
+  mimeType?: string
+  [key: string]: unknown
 }
+
+type MultiViewPayload = string | MultiViewBinaryData | null | undefined
+
+interface MultiViewResponseObject {
+  success?: boolean
+  mode?: string
+  front_b64?: MultiViewPayload
+  left_b64?: MultiViewPayload
+  right_b64?: MultiViewPayload
+  back_b64?: MultiViewPayload
+  front?: MultiViewPayload
+  left?: MultiViewPayload
+  right?: MultiViewPayload
+  back?: MultiViewPayload
+  binary?: Record<string, MultiViewPayload>
+  error?: unknown
+}
+
+interface MultiViewResponseItem {
+  json?: MultiViewResponseObject | Record<string, unknown>
+  binary?: Record<string, MultiViewPayload>
+  success?: boolean
+  error?: unknown
+}
+
+const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
 export default function BackgroundReplacer() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
@@ -40,6 +73,7 @@ export default function BackgroundReplacer() {
   const [isLoadingMulti, setIsLoadingMulti] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [warningMessage, setWarningMessage] = useState<string | null>(null)
   const [successMessage, setSuccessMessage] = useState<string | null>(null)
   const [processingTime, setProcessingTime] = useState<number | null>(null)
   const [imageDimensions, setImageDimensions] = useState<ImageDimensions | null>(null)
@@ -81,12 +115,14 @@ export default function BackgroundReplacer() {
       const validationError = validateFile(file)
       if (validationError) {
         setError(validationError)
+        setWarningMessage(null)
         return
       }
 
       setError(null)
+      setWarningMessage(null)
       setSelectedFile(file)
-
+    
       if (previewUrl) {
         URL.revokeObjectURL(previewUrl)
       }
@@ -146,6 +182,7 @@ export default function BackgroundReplacer() {
 
     setIsLoading(true)
     setError(null)
+    setWarningMessage(null)
     setSuccessMessage(null)
     setMultiViewResults(null)
     setResultBlob(null)
@@ -200,55 +237,209 @@ export default function BackgroundReplacer() {
     }
 
     const webhookUrl = "https://tharunkalluru.app.n8n.cloud/webhook/imagebg-multi"
+    const maxAttempts = 3
+    const retryDelayMs = 5000
 
     setIsLoadingMulti(true)
     setError(null)
+    setWarningMessage(null)
     setSuccessMessage(null)
 
-    try {
-      const formData = new FormData()
-      formData.append("file", resultBlob, "edited.jpg")
+    type ViewKey = "front" | "left" | "right" | "back"
 
-      const response = await fetch(webhookUrl, {
-        method: "POST",
-        body: formData,
-      })
+    const getDataUrl = (payload: MultiViewPayload): string => {
+      if (!payload) return ""
 
-      if (!response.ok) {
-        let errorMessage = `Server error: ${response.status}`
-        try {
-          const errorText = await response.text()
-          if (errorText) errorMessage += ` - ${errorText}`
-        } catch (e) {
-          // Ignore parsing errors
-        }
-        throw new Error(errorMessage)
+      if (typeof payload === "string") {
+        const trimmed = payload.trim()
+        if (!trimmed) return ""
+        if (trimmed.startsWith("data:")) return trimmed
+        return `data:image/jpeg;base64,${trimmed}`
       }
 
-      const data: MultiViewResponse = await response.json()
+      const base64 = typeof payload.data === "string" ? payload.data.trim() : ""
+      if (!base64) return ""
+      if (base64.startsWith("data:")) return base64
+      const mime = typeof payload.mimeType === "string" && payload.mimeType ? payload.mimeType : "image/jpeg"
+      return `data:${mime};base64,${base64}`
+    }
 
-      if (!data.success) {
+    const isRecord = (value: unknown): value is Record<string, unknown> =>
+      typeof value === "object" && value !== null && !Array.isArray(value)
+
+    const parseResponse = (data: unknown) => {
+      const viewKeys: ViewKey[] = ["front", "left", "right", "back"]
+      const viewAlias: Record<ViewKey, string[]> = {
+        front: ["front_b64", "front"],
+        left: ["left_b64", "left"],
+        right: ["right_b64", "right"],
+        back: ["back_b64", "back"],
+      }
+
+      const collectedPayloads: Partial<Record<ViewKey, MultiViewPayload>> = {}
+
+      const collectFromObject = (obj: MultiViewResponseObject | Record<string, unknown>) => {
+        const record = obj as Record<string, unknown>
+        for (const key of viewKeys) {
+          for (const alias of viewAlias[key]) {
+            if (collectedPayloads[key] !== undefined) break
+            const value = record[alias]
+            if (value !== undefined) {
+              collectedPayloads[key] = value as MultiViewPayload
+            }
+          }
+
+          if (collectedPayloads[key] !== undefined) continue
+
+          const binary = (obj as MultiViewResponseObject).binary
+          if (binary && typeof binary === "object") {
+            const binaryRecord = binary as Record<string, MultiViewPayload>
+            const value = binaryRecord[key]
+            if (value !== undefined) {
+              collectedPayloads[key] = value
+            }
+          }
+        }
+      }
+
+      let successFlag: boolean | undefined
+
+      if (Array.isArray(data)) {
+        for (const item of data) {
+          if (!isRecord(item)) continue
+
+          const typedItem = item as MultiViewResponseItem
+
+          if (typeof typedItem.success === "boolean") {
+            successFlag = typedItem.success
+          }
+
+          if (typedItem.error !== undefined && typedItem.error !== null) {
+            const message =
+              typeof typedItem.error === "string" ? typedItem.error : "Failed to generate multi-view images"
+            throw new Error(message)
+          }
+
+          const json = (typedItem.json ?? null) as MultiViewResponseObject | Record<string, unknown> | null
+          if (json && isRecord(json)) {
+            const jsonObject = json as MultiViewResponseObject
+            if (typeof jsonObject.success === "boolean") {
+              successFlag = jsonObject.success
+            }
+
+            if (jsonObject.error !== undefined && jsonObject.error !== null) {
+              const message =
+                typeof jsonObject.error === "string" ? jsonObject.error : "Failed to generate multi-view images"
+              throw new Error(message)
+            }
+
+            collectFromObject(jsonObject)
+          }
+
+          const binary = typedItem.binary
+          if (binary && typeof binary === "object") {
+            const binaryRecord = binary as Record<string, MultiViewPayload>
+            for (const key of viewKeys) {
+              if (collectedPayloads[key] !== undefined) continue
+              const value = binaryRecord[key]
+              if (value !== undefined) {
+                collectedPayloads[key] = value
+              }
+            }
+          }
+        }
+      } else if (isRecord(data)) {
+        const responseObject = data as MultiViewResponseObject
+
+        if (typeof responseObject.success === "boolean") {
+          successFlag = responseObject.success
+        }
+
+        if (responseObject.error !== undefined && responseObject.error !== null) {
+          const message =
+            typeof responseObject.error === "string" ? responseObject.error : "Failed to generate multi-view images"
+          throw new Error(message)
+        }
+
+        collectFromObject(responseObject)
+      }
+
+      if (successFlag === false) {
         throw new Error("Failed to generate multi-view images")
       }
 
       const views = {
-        front: data.front_b64 ? `data:image/jpeg;base64,${data.front_b64}` : "",
-        left: data.left_b64 ? `data:image/jpeg;base64,${data.left_b64}` : "",
-        right: data.right_b64 ? `data:image/jpeg;base64,${data.right_b64}` : "",
-        back: data.back_b64 ? `data:image/jpeg;base64,${data.back_b64}` : "",
+        front: getDataUrl(collectedPayloads.front),
+        left: getDataUrl(collectedPayloads.left),
+        right: getDataUrl(collectedPayloads.right),
+        back: getDataUrl(collectedPayloads.back),
       }
 
+      const generatedViews = Object.values(views).filter(Boolean).length
       const missingViews = Object.entries(views)
         .filter(([_, url]) => !url)
         .map(([view]) => view)
 
-      if (missingViews.length > 0) {
-        setError(`Warning: Some views were not generated: ${missingViews.join(", ")}`)
+      return { views, generatedViews, missingViews }
+    }
+
+    try {
+      let parsedResult: { views: Record<ViewKey, string>; generatedViews: number; missingViews: string[] } | null = null
+
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        if (attempt > 1) {
+          await delay(retryDelayMs)
+        }
+
+        const formData = new FormData()
+        formData.append("edited", resultBlob, "edited.jpg")
+
+        const response = await fetch(webhookUrl, {
+          method: "POST",
+          body: formData,
+        })
+
+        if (!response.ok) {
+          let errorMessage = `Server error: ${response.status}`
+          try {
+            const errorText = await response.text()
+            if (errorText) errorMessage += ` - ${errorText}`
+          } catch (e) {
+            // Ignore parsing errors
+          }
+          throw new Error(errorMessage)
+        }
+
+        const data: unknown = await response.json()
+        const result = parseResponse(data)
+
+        parsedResult = result
+
+        if (result.generatedViews > 0) {
+          break
+        }
       }
 
-      setMultiViewResults(views)
-      setSuccessMessage("Successfully generated 4 views")
+      if (!parsedResult || parsedResult.generatedViews === 0) {
+        throw new Error(
+          `No multi-view images were returned by the server after ${maxAttempts} attempts. Please try again in a moment.`,
+        )
+      }
+
+      setWarningMessage(
+        parsedResult.missingViews.length > 0
+          ? `Some views were not generated: ${parsedResult.missingViews.join(", ")}`
+          : null,
+      )
+
+      setMultiViewResults(parsedResult.views)
+      setSuccessMessage(
+        parsedResult.generatedViews === 4
+          ? "Successfully generated 4 views"
+          : `Generated ${parsedResult.generatedViews} of 4 views`,
+      )
     } catch (err) {
+      setWarningMessage(null)
       setError(err instanceof Error ? err.message : "An unexpected error occurred")
     } finally {
       setIsLoadingMulti(false)
@@ -265,6 +456,7 @@ export default function BackgroundReplacer() {
     setResultBlob(null)
     setMultiViewResults(null)
     setError(null)
+    setWarningMessage(null)
     setSuccessMessage(null)
     setProcessingTime(null)
     setImageDimensions(null)
@@ -328,6 +520,13 @@ export default function BackgroundReplacer() {
           <Alert className="mb-6 border-primary/50 bg-primary/5">
             <CheckCircle2 className="h-4 w-4 text-primary" />
             <AlertDescription className="text-primary">{successMessage}</AlertDescription>
+          </Alert>
+        )}
+
+        {warningMessage && !error && (
+          <Alert className="mb-6 border-yellow-500/50 bg-yellow-500/10 text-yellow-700">
+            <AlertTriangle className="h-4 w-4" />
+            <AlertDescription>{warningMessage}</AlertDescription>
           </Alert>
         )}
 
