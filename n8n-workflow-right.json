@@ -1,0 +1,114 @@
+{
+  "name": "Image Background - Generate Right View",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "imagebg-right",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-right",
+      "name": "Webhook Right",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [500, 300],
+      "webhookId": "imagebg-right-prod"
+    },
+    {
+      "parameters": {
+        "resource": "image",
+        "operation": "edit",
+        "prompt": "Right profile catalog shot showing right seams. Neutral studio background, torso-to-full body framing. No identifiable face.",
+        "images": {
+          "values": [
+            {
+              "binaryPropertyName": "edited"
+            }
+          ]
+        },
+        "options": {
+          "binaryPropertyOutput": "right"
+        }
+      },
+      "id": "gemini-right",
+      "name": "Gemini Right View",
+      "type": "@n8n/n8n-nodes-langchain.googleGemini",
+      "typeVersion": 1,
+      "position": [700, 300],
+      "credentials": {
+        "googlePalmApi": {
+          "id": "HdBNLwIq64OFkbh5",
+          "name": "Google Gemini(PaLM) Api account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "binary",
+        "options": {
+          "responseCode": 200,
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "={{$binary.right.mimeType || 'image/png'}}"
+              },
+              {
+                "name": "Content-Disposition",
+                "value": "inline; filename=\"right.png\""
+              },
+              {
+                "name": "Access-Control-Allow-Origin",
+                "value": "*"
+              },
+              {
+                "name": "Access-Control-Allow-Methods",
+                "value": "POST, OPTIONS"
+              },
+              {
+                "name": "Access-Control-Allow-Headers",
+                "value": "Content-Type"
+              }
+            ]
+          }
+        }
+      },
+      "id": "response-right",
+      "name": "Respond Right",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [900, 300]
+    }
+  ],
+  "connections": {
+    "Webhook Right": {
+      "main": [
+        [
+          {
+            "node": "Gemini Right View",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini Right View": {
+      "main": [
+        [
+          {
+            "node": "Respond Right",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
+
+

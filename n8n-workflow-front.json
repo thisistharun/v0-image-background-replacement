@@ -1,0 +1,114 @@
+{
+  "name": "Image Background - Generate Front View",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "imagebg-front",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-front",
+      "name": "Webhook Front",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [500, 300],
+      "webhookId": "imagebg-front-prod"
+    },
+    {
+      "parameters": {
+        "resource": "image",
+        "operation": "edit",
+        "prompt": "Front view catalog shot. Neutral studio backdrop, soft even lighting, torso-to-full body framing. No identifiable face.",
+        "images": {
+          "values": [
+            {
+              "binaryPropertyName": "edited"
+            }
+          ]
+        },
+        "options": {
+          "binaryPropertyOutput": "front"
+        }
+      },
+      "id": "gemini-front",
+      "name": "Gemini Front View",
+      "type": "@n8n/n8n-nodes-langchain.googleGemini",
+      "typeVersion": 1,
+      "position": [700, 300],
+      "credentials": {
+        "googlePalmApi": {
+          "id": "HdBNLwIq64OFkbh5",
+          "name": "Google Gemini(PaLM) Api account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "binary",
+        "options": {
+          "responseCode": 200,
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "={{$binary.front.mimeType || 'image/png'}}"
+              },
+              {
+                "name": "Content-Disposition",
+                "value": "inline; filename=\"front.png\""
+              },
+              {
+                "name": "Access-Control-Allow-Origin",
+                "value": "*"
+              },
+              {
+                "name": "Access-Control-Allow-Methods",
+                "value": "POST, OPTIONS"
+              },
+              {
+                "name": "Access-Control-Allow-Headers",
+                "value": "Content-Type"
+              }
+            ]
+          }
+        }
+      },
+      "id": "response-front",
+      "name": "Respond Front",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.4,
+      "position": [900, 300]
+    }
+  ],
+  "connections": {
+    "Webhook Front": {
+      "main": [
+        [
+          {
+            "node": "Gemini Front View",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini Front View": {
+      "main": [
+        [
+          {
+            "node": "Respond Front",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
+
+
