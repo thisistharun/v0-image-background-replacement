@@ -1,11 +1,3 @@
-/*
-# Setup
-1) Create `.env.local` with NEXT_PUBLIC_N8N_WEBHOOK_URL="https://YOUR_DOMAIN/webhook/imagebg" 
-   (Use the **Production URL** from your n8n Webhook node, not the test URL.)
-2) Run: npm i
-3) npm run dev
-*/
-
 "use client"
 
 import type React from "react"
@@ -17,22 +9,40 @@ import { Label } from "@/components/ui/label"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Separator } from "@/components/ui/separator"
 import { Skeleton } from "@/components/ui/skeleton"
-import { Upload, Download, RotateCcw, ImageIcon, Loader2, AlertCircle, CheckCircle2 } from "lucide-react"
+import { Carousel, CarouselContent, CarouselItem, CarouselNext, CarouselPrevious } from "@/components/ui/carousel"
+import { Upload, Download, RotateCcw, ImageIcon, Loader2, AlertCircle, CheckCircle2, Sparkles } from "lucide-react"
 
 interface ImageDimensions {
   width: number
   height: number
 }
 
+interface MultiViewResponse {
+  data: {
+    front?: string
+    left?: string
+    right?: string
+    back?: string
+  }
+}
+
 export default function BackgroundReplacer() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
   const [resultUrl, setResultUrl] = useState<string | null>(null)
+  const [multiViewResults, setMultiViewResults] = useState<{
+    front: string
+    left: string
+    right: string
+    back: string
+  } | null>(null)
+  const [isLoadingMulti, setIsLoadingMulti] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [processingTime, setProcessingTime] = useState<number | null>(null)
   const [imageDimensions, setImageDimensions] = useState<ImageDimensions | null>(null)
   const [dragActive, setDragActive] = useState(false)
+  const [hasGeneratedMultiView, setHasGeneratedMultiView] = useState(false)
 
   const fileInputRef = useRef<HTMLInputElement>(null)
   const dropZoneRef = useRef<HTMLDivElement>(null)
@@ -182,6 +192,55 @@ export default function BackgroundReplacer() {
     }
   }
 
+  const generateMultiViews = async () => {
+    if (!selectedFile || isLoadingMulti || hasGeneratedMultiView) {
+      return
+    }
+
+    const webhookUrl = "https://tharunkalluru.app.n8n.cloud/webhook/imagebg?multi=true"
+
+    setIsLoadingMulti(true)
+    setError(null)
+
+    try {
+      const formData = new FormData()
+      formData.append("file", selectedFile, selectedFile.name)
+
+      const response = await fetch(webhookUrl, {
+        method: "POST",
+        body: formData,
+      })
+
+      if (!response.ok) {
+        let errorMessage = `Server error: ${response.status}`
+        try {
+          const errorText = await response.text()
+          if (errorText) errorMessage += ` - ${errorText}`
+        } catch (e) {
+          // Ignore parsing errors
+        }
+        throw new Error(errorMessage)
+      }
+
+      const jsonResponse: MultiViewResponse = await response.json()
+
+      // Convert base64 to blob URLs
+      const views = {
+        front: jsonResponse.data.front ? `data:image/jpeg;base64,${jsonResponse.data.front}` : "",
+        left: jsonResponse.data.left ? `data:image/jpeg;base64,${jsonResponse.data.left}` : "",
+        right: jsonResponse.data.right ? `data:image/jpeg;base64,${jsonResponse.data.right}` : "",
+        back: jsonResponse.data.back ? `data:image/jpeg;base64,${jsonResponse.data.back}` : "",
+      }
+
+      setMultiViewResults(views)
+      setHasGeneratedMultiView(true)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "An unexpected error occurred")
+    } finally {
+      setIsLoadingMulti(false)
+    }
+  }
+
   const reset = () => {
     if (previewUrl) URL.revokeObjectURL(previewUrl)
     if (resultUrl) URL.revokeObjectURL(resultUrl)
@@ -189,6 +248,8 @@ export default function BackgroundReplacer() {
     setSelectedFile(null)
     setPreviewUrl(null)
     setResultUrl(null)
+    setMultiViewResults(null)
+    setHasGeneratedMultiView(false)
     setError(null)
     setProcessingTime(null)
     setImageDimensions(null)
@@ -204,6 +265,17 @@ export default function BackgroundReplacer() {
     const link = document.createElement("a")
     link.href = resultUrl
     link.download = `bg-replaced-${selectedFile.name}`
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+  }
+
+  const downloadMultiView = (view: string, viewName: string) => {
+    if (!selectedFile) return
+
+    const link = document.createElement("a")
+    link.href = view
+    link.download = `${viewName}-${selectedFile.name}`
     document.body.appendChild(link)
     link.click()
     document.body.removeChild(link)
@@ -326,6 +398,27 @@ export default function BackgroundReplacer() {
                 </Button>
               </div>
 
+              {resultUrl && !hasGeneratedMultiView && (
+                <Button
+                  onClick={generateMultiViews}
+                  disabled={isLoadingMulti}
+                  className="w-full bg-primary hover:bg-primary/90"
+                  variant="default"
+                >
+                  {isLoadingMulti ? (
+                    <>
+                      <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                      Generating Views...
+                    </>
+                  ) : (
+                    <>
+                      <Sparkles className="h-4 w-4 mr-2" />
+                      Generate Multi Views
+                    </>
+                  )}
+                </Button>
+              )}
+
               {!selectedFile && (
                 <p className="text-xs text-muted-foreground text-center">Select an image to get started</p>
               )}
@@ -388,11 +481,110 @@ export default function BackgroundReplacer() {
               </div>
 
               {/* Download Button */}
-              {resultUrl && (
+              {resultUrl && !multiViewResults && (
                 <Button onClick={downloadResult} className="w-full bg-transparent" variant="outline">
                   <Download className="h-4 w-4 mr-2" />
                   Download Result
                 </Button>
+              )}
+
+              {multiViewResults && (
+                <div className="space-y-4">
+                  <Separator />
+                  <div>
+                    <Label className="text-sm font-medium text-muted-foreground mb-3 block">Multi-View Results</Label>
+                    <Carousel className="w-full">
+                      <CarouselContent>
+                        <CarouselItem>
+                          <div className="space-y-2">
+                            <div className="relative rounded-lg overflow-hidden bg-muted/30">
+                              <img
+                                src={multiViewResults.front || "/placeholder.svg"}
+                                alt="Front view"
+                                className="w-full h-auto max-h-64 object-contain"
+                              />
+                            </div>
+                            <div className="flex items-center justify-between">
+                              <p className="text-xs font-medium text-muted-foreground">Front View</p>
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                onClick={() => downloadMultiView(multiViewResults.front, "front")}
+                              >
+                                <Download className="h-3 w-3" />
+                              </Button>
+                            </div>
+                          </div>
+                        </CarouselItem>
+                        <CarouselItem>
+                          <div className="space-y-2">
+                            <div className="relative rounded-lg overflow-hidden bg-muted/30">
+                              <img
+                                src={multiViewResults.left || "/placeholder.svg"}
+                                alt="Left view"
+                                className="w-full h-auto max-h-64 object-contain"
+                              />
+                            </div>
+                            <div className="flex items-center justify-between">
+                              <p className="text-xs font-medium text-muted-foreground">Left View</p>
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                onClick={() => downloadMultiView(multiViewResults.left, "left")}
+                              >
+                                <Download className="h-3 w-3" />
+                              </Button>
+                            </div>
+                          </div>
+                        </CarouselItem>
+                        <CarouselItem>
+                          <div className="space-y-2">
+                            <div className="relative rounded-lg overflow-hidden bg-muted/30">
+                              <img
+                                src={multiViewResults.right || "/placeholder.svg"}
+                                alt="Right view"
+                                className="w-full h-auto max-h-64 object-contain"
+                              />
+                            </div>
+                            <div className="flex items-center justify-between">
+                              <p className="text-xs font-medium text-muted-foreground">Right View</p>
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                onClick={() => downloadMultiView(multiViewResults.right, "right")}
+                              >
+                                <Download className="h-3 w-3" />
+                              </Button>
+                            </div>
+                          </div>
+                        </CarouselItem>
+                        <CarouselItem>
+                          <div className="space-y-2">
+                            <div className="relative rounded-lg overflow-hidden bg-muted/30">
+                              <img
+                                src={multiViewResults.back || "/placeholder.svg"}
+                                alt="Back view"
+                                className="w-full h-auto max-h-64 object-contain"
+                              />
+                            </div>
+                            <div className="flex items-center justify-between">
+                              <p className="text-xs font-medium text-muted-foreground">Back View</p>
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                onClick={() => downloadMultiView(multiViewResults.back, "back")}
+                              >
+                                <Download className="h-3 w-3" />
+                              </Button>
+                            </div>
+                          </div>
+                        </CarouselItem>
+                      </CarouselContent>
+                      <CarouselPrevious />
+                      <CarouselNext />
+                    </Carousel>
+                  </div>
+                </div>
               )}
             </CardContent>
           </Card>
