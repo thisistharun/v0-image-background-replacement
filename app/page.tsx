@@ -18,18 +18,19 @@ interface ImageDimensions {
 }
 
 interface MultiViewResponse {
-  data: {
-    front?: string
-    left?: string
-    right?: string
-    back?: string
-  }
+  success: boolean
+  mode?: string
+  front_b64?: string
+  left_b64?: string
+  right_b64?: string
+  back_b64?: string
 }
 
 export default function BackgroundReplacer() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
   const [previewUrl, setPreviewUrl] = useState<string | null>(null)
   const [resultUrl, setResultUrl] = useState<string | null>(null)
+  const [resultBlob, setResultBlob] = useState<Blob | null>(null)
   const [multiViewResults, setMultiViewResults] = useState<{
     front: string
     left: string
@@ -39,15 +40,14 @@ export default function BackgroundReplacer() {
   const [isLoadingMulti, setIsLoadingMulti] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [successMessage, setSuccessMessage] = useState<string | null>(null)
   const [processingTime, setProcessingTime] = useState<number | null>(null)
   const [imageDimensions, setImageDimensions] = useState<ImageDimensions | null>(null)
   const [dragActive, setDragActive] = useState(false)
-  const [hasGeneratedMultiView, setHasGeneratedMultiView] = useState(false)
 
   const fileInputRef = useRef<HTMLInputElement>(null)
   const dropZoneRef = useRef<HTMLDivElement>(null)
 
-  // Cleanup object URLs on unmount
   useEffect(() => {
     return () => {
       if (previewUrl) URL.revokeObjectURL(previewUrl)
@@ -87,7 +87,6 @@ export default function BackgroundReplacer() {
       setError(null)
       setSelectedFile(file)
 
-      // Revoke previous preview URL
       if (previewUrl) {
         URL.revokeObjectURL(previewUrl)
       }
@@ -147,6 +146,9 @@ export default function BackgroundReplacer() {
 
     setIsLoading(true)
     setError(null)
+    setSuccessMessage(null)
+    setMultiViewResults(null)
+    setResultBlob(null)
     const startTime = performance.now()
 
     try {
@@ -175,13 +177,13 @@ export default function BackgroundReplacer() {
         throw new Error("Unexpected response from server")
       }
 
-      // Revoke previous result URL
       if (resultUrl) {
         URL.revokeObjectURL(resultUrl)
       }
 
       const newResultUrl = URL.createObjectURL(blob)
       setResultUrl(newResultUrl)
+      setResultBlob(blob)
 
       const endTime = performance.now()
       setProcessingTime(Math.round(endTime - startTime))
@@ -193,18 +195,19 @@ export default function BackgroundReplacer() {
   }
 
   const generateMultiViews = async () => {
-    if (!selectedFile || isLoadingMulti || hasGeneratedMultiView) {
+    if (!resultBlob || isLoadingMulti) {
       return
     }
 
-    const webhookUrl = "https://tharunkalluru.app.n8n.cloud/webhook/imagebg?multi=true"
+    const webhookUrl = "https://tharunkalluru.app.n8n.cloud/webhook/imagebg-multi"
 
     setIsLoadingMulti(true)
     setError(null)
+    setSuccessMessage(null)
 
     try {
       const formData = new FormData()
-      formData.append("file", selectedFile, selectedFile.name)
+      formData.append("file", resultBlob, "edited.jpg")
 
       const response = await fetch(webhookUrl, {
         method: "POST",
@@ -222,18 +225,29 @@ export default function BackgroundReplacer() {
         throw new Error(errorMessage)
       }
 
-      const jsonResponse: MultiViewResponse = await response.json()
+      const data: MultiViewResponse = await response.json()
 
-      // Convert base64 to blob URLs
+      if (!data.success) {
+        throw new Error("Failed to generate multi-view images")
+      }
+
       const views = {
-        front: jsonResponse.data.front ? `data:image/jpeg;base64,${jsonResponse.data.front}` : "",
-        left: jsonResponse.data.left ? `data:image/jpeg;base64,${jsonResponse.data.left}` : "",
-        right: jsonResponse.data.right ? `data:image/jpeg;base64,${jsonResponse.data.right}` : "",
-        back: jsonResponse.data.back ? `data:image/jpeg;base64,${jsonResponse.data.back}` : "",
+        front: data.front_b64 ? `data:image/jpeg;base64,${data.front_b64}` : "",
+        left: data.left_b64 ? `data:image/jpeg;base64,${data.left_b64}` : "",
+        right: data.right_b64 ? `data:image/jpeg;base64,${data.right_b64}` : "",
+        back: data.back_b64 ? `data:image/jpeg;base64,${data.back_b64}` : "",
+      }
+
+      const missingViews = Object.entries(views)
+        .filter(([_, url]) => !url)
+        .map(([view]) => view)
+
+      if (missingViews.length > 0) {
+        setError(`Warning: Some views were not generated: ${missingViews.join(", ")}`)
       }
 
       setMultiViewResults(views)
-      setHasGeneratedMultiView(true)
+      setSuccessMessage("Successfully generated 4 views")
     } catch (err) {
       setError(err instanceof Error ? err.message : "An unexpected error occurred")
     } finally {
@@ -248,9 +262,10 @@ export default function BackgroundReplacer() {
     setSelectedFile(null)
     setPreviewUrl(null)
     setResultUrl(null)
+    setResultBlob(null)
     setMultiViewResults(null)
-    setHasGeneratedMultiView(false)
     setError(null)
+    setSuccessMessage(null)
     setProcessingTime(null)
     setImageDimensions(null)
 
@@ -305,6 +320,14 @@ export default function BackgroundReplacer() {
           <Alert className="mb-6 border-destructive/50 text-destructive">
             <AlertCircle className="h-4 w-4" />
             <AlertDescription>{error}</AlertDescription>
+          </Alert>
+        )}
+
+        {/* Success Message Alert */}
+        {successMessage && !error && (
+          <Alert className="mb-6 border-primary/50 bg-primary/5">
+            <CheckCircle2 className="h-4 w-4 text-primary" />
+            <AlertDescription className="text-primary">{successMessage}</AlertDescription>
           </Alert>
         )}
 
@@ -398,24 +421,24 @@ export default function BackgroundReplacer() {
                 </Button>
               </div>
 
-              {resultUrl && !hasGeneratedMultiView && (
+              {/* Generate Multi Views Button */}
+              {resultUrl && !multiViewResults && !isLoadingMulti && (
                 <Button
                   onClick={generateMultiViews}
                   disabled={isLoadingMulti}
                   className="w-full bg-primary hover:bg-primary/90"
                   variant="default"
                 >
-                  {isLoadingMulti ? (
-                    <>
-                      <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                      Generating Views...
-                    </>
-                  ) : (
-                    <>
-                      <Sparkles className="h-4 w-4 mr-2" />
-                      Generate Multi Views
-                    </>
-                  )}
+                  <Sparkles className="h-4 w-4 mr-2" />
+                  Generate Multi Views
+                </Button>
+              )}
+
+              {/* Loading State for Multi-View Generation */}
+              {isLoadingMulti && (
+                <Button disabled className="w-full bg-primary" variant="default">
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  Generating 4 Views...
                 </Button>
               )}
 
