@@ -76,6 +76,8 @@ export default function BackgroundReplacer() {
   const [processingTime, setProcessingTime] = useState<number | null>(null)
   const [imageDimensions, setImageDimensions] = useState<ImageDimensions | null>(null)
   const [dragActive, setDragActive] = useState(false)
+  const [multiViewStartTime, setMultiViewStartTime] = useState<number | null>(null)
+  const [elapsedTime, setElapsedTime] = useState<number>(0)
 
   const fileInputRef = useRef<HTMLInputElement>(null)
   const dropZoneRef = useRef<HTMLDivElement>(null)
@@ -86,6 +88,23 @@ export default function BackgroundReplacer() {
       if (resultUrl) URL.revokeObjectURL(resultUrl)
     }
   }, [])
+
+  // Timer for multi-view generation
+  useEffect(() => {
+    let intervalId: NodeJS.Timeout | null = null
+    
+    if (isLoadingMulti && multiViewStartTime) {
+      intervalId = setInterval(() => {
+        setElapsedTime(Math.floor((Date.now() - multiViewStartTime) / 1000))
+      }, 1000)
+    } else {
+      setElapsedTime(0)
+    }
+
+    return () => {
+      if (intervalId) clearInterval(intervalId)
+    }
+  }, [isLoadingMulti, multiViewStartTime])
 
   const validateFile = (file: File): string | null => {
     if (!file.type.startsWith("image/")) {
@@ -240,28 +259,66 @@ export default function BackgroundReplacer() {
     setError(null)
     setWarningMessage(null)
     setSuccessMessage(null)
+    setMultiViewStartTime(Date.now())
 
     try {
       const formData = new FormData()
       formData.append("edited", resultBlob, "edited.jpg")
 
+      console.log("=== STARTING MULTI-VIEW REQUEST ===")
+      console.log("Webhook URL:", webhookUrl)
+      console.log("File size:", resultBlob.size, "bytes")
+      console.log("File type:", resultBlob.type)
+
+      // Create an AbortController with a longer timeout for multi-view generation
+      const controller = new AbortController()
+      const timeoutId = setTimeout(() => {
+        console.error("Request timed out after 3 minutes")
+        controller.abort()
+      }, 180000) // 3 minutes timeout
+
+      console.log("Sending fetch request...")
+      const fetchStartTime = Date.now()
+      
       const response = await fetch(webhookUrl, {
         method: "POST",
         body: formData,
+        signal: controller.signal,
       })
 
+      const fetchDuration = Date.now() - fetchStartTime
+      console.log(`Fetch completed in ${fetchDuration}ms`)
+
+      clearTimeout(timeoutId)
+
+      console.log("Response status:", response.status, response.statusText)
+      console.log("Response headers:", Object.fromEntries(response.headers.entries()))
+
       if (!response.ok) {
-        let errorMessage = `Server error: ${response.status}`
+        let errorMessage = `Server error: ${response.status} ${response.statusText}`
         try {
           const errorText = await response.text()
+          console.error("Error response body:", errorText)
           if (errorText) errorMessage += ` - ${errorText}`
         } catch (e) {
-          // Ignore parsing errors
+          console.error("Could not read error response:", e)
         }
         throw new Error(errorMessage)
       }
 
-      const data: unknown = await response.json()
+      const contentType = response.headers.get("content-type")
+      console.log("Content-Type:", contentType)
+
+      let data: unknown
+      try {
+        const responseText = await response.text()
+        console.log("Raw response (first 500 chars):", responseText.substring(0, 500))
+        data = JSON.parse(responseText)
+        console.log("Parsed JSON response:", JSON.stringify(data, null, 2))
+      } catch (e) {
+        console.error("Failed to parse response as JSON:", e)
+        throw new Error("Server returned invalid JSON response")
+      }
 
       const getDataUrl = (payload: MultiViewPayload): string => {
         if (!payload) return ""
@@ -297,10 +354,17 @@ export default function BackgroundReplacer() {
       const collectFromObject = (obj: MultiViewResponseObject | Record<string, unknown>) => {
         const record = obj as Record<string, unknown>
         for (const key of viewKeys) {
+          // First check direct properties (from Code node response)
           for (const alias of viewAlias[key]) {
             if (collectedPayloads[key] !== undefined) break
             const value = record[alias]
-            if (value !== undefined) {
+            if (value !== undefined && value !== null) {
+              // Skip invalid data URLs (like "data:image/png;base64,filesystem-v2")
+              if (typeof value === 'string' && value.includes('filesystem-v2')) {
+                console.log(`Skipping invalid ${key} data: ${value}`)
+                continue
+              }
+              console.log(`Found ${key} in direct properties:`, typeof value)
               collectedPayloads[key] = value as MultiViewPayload
             }
           }
@@ -312,6 +376,7 @@ export default function BackgroundReplacer() {
             const binaryRecord = binary as Record<string, MultiViewPayload>
             const value = binaryRecord[key]
             if (value !== undefined) {
+              console.log(`Found ${key} in binary:`, value)
               collectedPayloads[key] = value
             }
           }
@@ -321,10 +386,15 @@ export default function BackgroundReplacer() {
       let successFlag: boolean | undefined
 
       if (Array.isArray(data)) {
+        console.log(`Processing ${data.length} items from array response`)
         for (const item of data) {
-          if (!isRecord(item)) continue
+          if (!isRecord(item)) {
+            console.log("Skipping non-record item:", item)
+            continue
+          }
 
           const typedItem = item as MultiViewResponseItem
+          console.log("Processing item:", Object.keys(item))
 
           if (typeof typedItem.success === "boolean") {
             successFlag = typedItem.success
@@ -334,6 +404,16 @@ export default function BackgroundReplacer() {
             const message =
               typeof typedItem.error === "string" ? typedItem.error : "Failed to generate multi-view images"
             throw new Error(message)
+          }
+
+          // First check if the views are directly on the item (n8n Code node format)
+          for (const key of viewKeys) {
+            if (collectedPayloads[key] !== undefined) continue
+            const value = (item as any)[key]
+            if (value && typeof value === 'string' && value.startsWith('data:image/')) {
+              console.log(`Found ${key} directly on item`)
+              collectedPayloads[key] = value
+            }
           }
 
           const json = (typedItem.json ?? null) as MultiViewResponseObject | Record<string, unknown> | null
@@ -349,22 +429,37 @@ export default function BackgroundReplacer() {
               throw new Error(message)
             }
 
-            collectFromObject(jsonObject)
+            // Check if json has a 'views' object (new format)
+            if ('views' in jsonObject && isRecord(jsonObject.views)) {
+              const views = jsonObject.views as Record<string, MultiViewPayload>
+              console.log("Found views object in json:", Object.keys(views))
+              for (const key of viewKeys) {
+                if (views[key] !== undefined) {
+                  console.log(`Collecting ${key} from json.views`)
+                  collectedPayloads[key] = views[key]
+                }
+              }
+            } else {
+              collectFromObject(jsonObject)
+            }
           }
 
           const binary = typedItem.binary
           if (binary && typeof binary === "object") {
+            console.log("Binary keys found:", Object.keys(binary))
             const binaryRecord = binary as Record<string, MultiViewPayload>
             for (const key of viewKeys) {
               if (collectedPayloads[key] !== undefined) continue
               const value = binaryRecord[key]
               if (value !== undefined) {
+                console.log(`Collecting ${key} from item binary`)
                 collectedPayloads[key] = value
               }
             }
           }
         }
       } else if (isRecord(data)) {
+        console.log("Processing single object response")
         const responseObject = data as MultiViewResponseObject
 
         if (typeof responseObject.success === "boolean") {
@@ -377,12 +472,27 @@ export default function BackgroundReplacer() {
           throw new Error(message)
         }
 
-        collectFromObject(responseObject)
+        // Check if response has a 'views' object (new format)
+        if (isRecord(responseObject) && 'views' in responseObject) {
+          const views = responseObject.views as Record<string, MultiViewPayload>
+          console.log("Found views object:", Object.keys(views))
+          for (const key of viewKeys) {
+            if (views[key] !== undefined) {
+              console.log(`Collecting ${key} from views object`)
+              collectedPayloads[key] = views[key]
+            }
+          }
+        } else {
+          collectFromObject(responseObject)
+        }
       }
 
       if (successFlag === false) {
         throw new Error("Failed to generate multi-view images")
       }
+
+      console.log("Collected payloads:", Object.keys(collectedPayloads))
+      console.log("Payload details:", collectedPayloads)
 
       const views = {
         front: getDataUrl(collectedPayloads.front),
@@ -391,9 +501,12 @@ export default function BackgroundReplacer() {
         back: getDataUrl(collectedPayloads.back),
       }
 
+      console.log("Generated views:", Object.entries(views).map(([k, v]) => `${k}: ${v ? 'YES' : 'NO'}`))
+
       const generatedViews = Object.values(views).filter(Boolean).length
 
       if (generatedViews === 0) {
+        console.error("No views generated. Collected payloads were:", collectedPayloads)
         throw new Error("No multi-view images were returned by the server")
       }
 
@@ -415,9 +528,24 @@ export default function BackgroundReplacer() {
       )
     } catch (err) {
       setWarningMessage(null)
-      setError(err instanceof Error ? err.message : "An unexpected error occurred")
+      console.error("Multi-view generation error:", err)
+      console.error("Error type:", err instanceof Error ? err.constructor.name : typeof err)
+      console.error("Error details:", err)
+      
+      if (err instanceof Error) {
+        if (err.name === "AbortError") {
+          setError("Request timed out. Multi-view generation takes up to 3 minutes. Please try again with a smaller image or check your internet connection.")
+        } else if (err.name === "TypeError" && err.message.includes("fetch")) {
+          setError("Network error: Could not connect to n8n server. Please check your internet connection and ensure the n8n webhook URL is correct.")
+        } else {
+          setError(`Error: ${err.message}`)
+        }
+      } else {
+        setError("An unexpected error occurred")
+      }
     } finally {
       setIsLoadingMulti(false)
+      setMultiViewStartTime(null)
     }
   }
 
@@ -610,10 +738,16 @@ export default function BackgroundReplacer() {
 
               {/* Loading State for Multi-View Generation */}
               {isLoadingMulti && (
-                <Button disabled className="w-full bg-primary" variant="default">
-                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                  Generating 4 Views...
-                </Button>
+                <div className="space-y-2">
+                  <Button disabled className="w-full bg-primary" variant="default">
+                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                    Generating 4 Views... {elapsedTime > 0 && `(${elapsedTime}s)`}
+                  </Button>
+                  <p className="text-xs text-muted-foreground text-center">
+                    This may take 1-3 minutes. Please wait while we process 4 AI views...
+                    {elapsedTime > 60 && " Almost there!"}
+                  </p>
+                </div>
               )}
 
               {!selectedFile && (
